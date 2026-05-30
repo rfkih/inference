@@ -1,0 +1,34 @@
+[project]
+name = "blackheart-inference"
+version = "0.1.0"
+description = "ML inference sidecar for Blackheart. Loads model_registry artifacts trained by blackheart-train, fetches features from feature_values, runs predictions, writes signal_history rows the trading JVM consumes via MLSignalService."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "asyncpg>=0.29",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "httpx>=0.27",
+    "structlog>=24.4",
+    "lightgbm>=4.3",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
