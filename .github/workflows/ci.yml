@@ -153,23 +153,21 @@ jobs:
         env:
           NEW_TAG: ${{ needs.build-image.outputs.sha_tag }}
         run: |
-          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" bash -c '
-            DB_PASS=$(grep BLACKHEART_RESEARCH_PASSWORD /home/starsky/blackheart/.env | cut -d= -f2)
-            docker rm -f blackheart-inference 2>/dev/null || true
-            docker pull ghcr.io/rfkih/blackheart-inference:'"${NEW_TAG}"'
-            docker run -d --name blackheart-inference --restart unless-stopped \
-              --network blackheart_default \
-              -p 8000:8000 \
-              -v /home/starsky/blackheart-train/artifacts:/artifacts:ro \
-              -e INFERENCE_PROFILE=prod \
-              -e INFERENCE_HOST=0.0.0.0 \
-              -e INFERENCE_PORT=8000 \
-              -e INFERENCE_AUTH_TOKEN=prod-inference-token \
-              -e "INFERENCE_DB_DSN=postgresql://blackheart_research:'"${DB_PASS}"'@postgres:5432/trading_db" \
-              -e INFERENCE_ARTIFACT_DIR=/artifacts \
-              -e INFERENCE_STREAMING_ENABLED=true \
-              ghcr.io/rfkih/blackheart-inference:'"${NEW_TAG}"'
-          '
+          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+            "docker rm -f blackheart-inference 2>/dev/null || true && \
+             docker pull ghcr.io/rfkih/blackheart-inference:${NEW_TAG} && \
+             docker run -d --name blackheart-inference --restart unless-stopped \
+               --network blackheart_default \
+               -p 8000:8000 \
+               -v /home/starsky/blackheart-train/artifacts:/artifacts:ro \
+               -e INFERENCE_PROFILE=prod \
+               -e INFERENCE_HOST=0.0.0.0 \
+               -e INFERENCE_PORT=8000 \
+               -e INFERENCE_AUTH_TOKEN=prod-inference-token \
+               -e 'INFERENCE_DB_DSN=postgresql://blackheart_research:CLjj505OEU5emM5aaLCmHJlRrwcx@postgres:5432/trading_db' \
+               -e INFERENCE_ARTIFACT_DIR=/artifacts \
+               -e INFERENCE_STREAMING_ENABLED=true \
+               ghcr.io/rfkih/blackheart-inference:${NEW_TAG}"
 
       - name: Inference healthcheck (with rollback on failure)
         # 12 attempts × 10s = 120s. /readyz probes the DB pool, so it only returns
@@ -185,22 +183,20 @@ jobs:
           if [ "$HEALTH" -ne 0 ]; then
             echo "::error::Inference healthcheck failed. Rolling back to ${PREV_TAG}."
             if [ "${PREV_TAG}" != "NONE" ]; then
-              ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" bash -c '
-                DB_PASS=$(grep BLACKHEART_RESEARCH_PASSWORD /home/starsky/blackheart/.env | cut -d= -f2)
-                docker rm -f blackheart-inference
-                docker run -d --name blackheart-inference --restart unless-stopped \
-                  --network blackheart_default \
-                  -p 8000:8000 \
-                  -v /home/starsky/blackheart-train/artifacts:/artifacts:ro \
-                  -e INFERENCE_PROFILE=prod \
-                  -e INFERENCE_HOST=0.0.0.0 \
-                  -e INFERENCE_PORT=8000 \
-                  -e INFERENCE_AUTH_TOKEN=prod-inference-token \
-                  -e "INFERENCE_DB_DSN=postgresql://blackheart_research:'"${DB_PASS}"'@postgres:5432/trading_db" \
-                  -e INFERENCE_ARTIFACT_DIR=/artifacts \
-                  -e INFERENCE_STREAMING_ENABLED=true \
-                  ghcr.io/rfkih/blackheart-inference:'"${PREV_TAG}"'
-              '
+              ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+                "docker rm -f blackheart-inference && \
+                 docker run -d --name blackheart-inference --restart unless-stopped \
+                   --network blackheart_default \
+                   -p 8000:8000 \
+                   -v /home/starsky/blackheart-train/artifacts:/artifacts:ro \
+                   -e INFERENCE_PROFILE=prod \
+                   -e INFERENCE_HOST=0.0.0.0 \
+                   -e INFERENCE_PORT=8000 \
+                   -e INFERENCE_AUTH_TOKEN=prod-inference-token \
+                   -e 'INFERENCE_DB_DSN=postgresql://blackheart_research:CLjj505OEU5emM5aaLCmHJlRrwcx@postgres:5432/trading_db' \
+                   -e INFERENCE_ARTIFACT_DIR=/artifacts \
+                   -e INFERENCE_STREAMING_ENABLED=true \
+                   ghcr.io/rfkih/blackheart-inference:${PREV_TAG}"
             fi
             exit 1
           fi
