@@ -12,3 +12,4 @@ researcher-facing surface; the trading JVM (``:8080``) and research JVM
 """
 
 __version__ = "0.1.0"
+# Workflow test at Sat May 30 20:43:49 SEAST 2026
