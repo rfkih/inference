@@ -147,12 +147,25 @@ jobs:
           echo "NEW_TAG=${NEW_TAG}" >> "$GITHUB_ENV"
 
       - name: Pull + recreate inference container
-        # The consolidated compose file (with the inference service) is synced to
-        # the VPS by the trading repo's deploy. This job only re-pins the tag and
-        # recreates the inference container; other services keep running.
+        # Deploys inference service using docker run (not docker-compose).
+        # VPS docker-compose.yml is not available. This job pulls the new image,
+        # removes the old container, and starts the new one with proper networking.
         run: |
           ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
-            "cd /home/starsky/blackheart && docker compose pull inference && docker compose up -d inference"
+            "docker rm -f blackheart-inference 2>/dev/null || true && \
+             docker pull ghcr.io/rfkih/blackheart-inference:${NEW_TAG} && \
+             docker run -d --name blackheart-inference --restart unless-stopped \
+             --network blackheart_default \
+             -p 8000:8000 \
+             -v /home/starsky/blackheart-train/artifacts:/artifacts:ro \
+             -e INFERENCE_PROFILE=prod \
+             -e INFERENCE_HOST=0.0.0.0 \
+             -e INFERENCE_PORT=8000 \
+             -e INFERENCE_AUTH_TOKEN=prod-inference-token \
+             -e 'INFERENCE_DB_DSN=postgresql://blackheart_research:\$(grep BLACKHEART_RESEARCH_PASSWORD /home/starsky/blackheart/.env | cut -d= -f2)@postgres:5432/trading_db' \
+             -e INFERENCE_ARTIFACT_DIR=/artifacts \
+             -e INFERENCE_STREAMING_ENABLED=true \
+             ghcr.io/rfkih/blackheart-inference:${NEW_TAG}"
 
       - name: Inference healthcheck (with rollback on failure)
         # 12 attempts × 10s = 120s. /readyz probes the DB pool, so it only returns
@@ -169,7 +182,18 @@ jobs:
             echo "::error::Inference healthcheck failed. Rolling back to ${PREV_TAG}."
             if [ "${PREV_TAG}" != "NONE" ]; then
               ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
-                "set -e && grep -v '^INFERENCE_TAG=' /home/starsky/blackheart/.env > /tmp/.env.rollback && echo 'INFERENCE_TAG=${PREV_TAG}' >> /tmp/.env.rollback && mv /tmp/.env.rollback /home/starsky/blackheart/.env && cd /home/starsky/blackheart && docker compose up -d inference"
+                "docker rm -f blackheart-inference && docker run -d --name blackheart-inference --restart unless-stopped \
+                 --network blackheart_default \
+                 -p 8000:8000 \
+                 -v /home/starsky/blackheart-train/artifacts:/artifacts:ro \
+                 -e INFERENCE_PROFILE=prod \
+                 -e INFERENCE_HOST=0.0.0.0 \
+                 -e INFERENCE_PORT=8000 \
+                 -e INFERENCE_AUTH_TOKEN=prod-inference-token \
+                 -e 'INFERENCE_DB_DSN=postgresql://blackheart_research:\$(grep BLACKHEART_RESEARCH_PASSWORD /home/starsky/blackheart/.env | cut -d= -f2)@postgres:5432/trading_db' \
+                 -e INFERENCE_ARTIFACT_DIR=/artifacts \
+                 -e INFERENCE_STREAMING_ENABLED=true \
+                 ghcr.io/rfkih/blackheart-inference:${PREV_TAG}"
             fi
             exit 1
           fi
