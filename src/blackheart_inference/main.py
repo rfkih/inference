@@ -8,6 +8,7 @@ from functools import partial
 
 from fastapi import FastAPI
 
+from .api.batch import router as batch_router
 from .api.health import router as health_router
 from .api.inference import router as inference_router
 from .api.streaming import router as streaming_router
@@ -83,6 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(inference_router)
     app.include_router(streaming_router)
+    app.include_router(batch_router)
     return app
 
 

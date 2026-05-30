@@ -18,6 +18,24 @@ from typing import Any
 import asyncpg
 
 
+async def get_latest_ts(
+    conn: asyncpg.Connection,
+) -> datetime | None:
+    """Get the latest timestamp from feature_values.
+
+    Returns None if no rows exist in feature_values (empty table).
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT MAX(ts) as latest_ts
+          FROM feature_values
+        """
+    )
+    if row and row["latest_ts"]:
+        return row["latest_ts"]
+    return None
+
+
 async def fetch_feature_versions(
     conn: asyncpg.Connection, feature_names: list[str]
 ) -> dict[str, int]:

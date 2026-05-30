@@ -25,6 +25,26 @@ import asyncpg
 VALID_SOURCES = frozenset({"stream", "catchup_scan", "historical_replay"})
 
 
+async def fetch_active_signals(
+    conn: asyncpg.Connection,
+) -> list[dict[str, Any]]:
+    """Fetch all active or shadow signals ready for batch inference.
+
+    Returns list of signal_definition rows (signal_id, name, model_id,
+    status, horizon, value_range, description). Filters out retired and
+    rejected_by_operator signals.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT signal_id, name, model_id, horizon, value_range,
+               description, status
+          FROM signal_definition
+         WHERE status IN ('active', 'shadow')
+        """
+    )
+    return [dict(r) for r in rows]
+
+
 async def upsert_signal_value(
     conn: asyncpg.Connection,
     *,
