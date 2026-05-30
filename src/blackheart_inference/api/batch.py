@@ -22,6 +22,7 @@ from uuid import UUID
 import asyncpg
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
+import structlog
 
 from ..errors import InferenceError
 from ..repo import features as features_repo
@@ -30,6 +31,8 @@ from ..repo import signals as signals_repo
 from ..services.artifact_loader import read_artifact
 from ..services.predictor import EmptyModelError, MissingFeatureError, predict_single
 from .deps import get_agent_name, get_db_conn
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/inference", tags=["inference"])
 
@@ -42,13 +45,35 @@ class BatchPredictBody(BaseModel):
     )
 
 
+class BatchPredictResponse(BaseModel):
+    """Response from batch-predict endpoint."""
+
+    status: str = Field(
+        ...,
+        description='Status: "ok" if all succeeded, "partial" if some failed, "error" if all failed',
+    )
+    signals_processed: int = Field(
+        ..., description="Total number of signals attempted"
+    )
+    rows_written: int = Field(
+        ..., description="Number of predictions successfully written"
+    )
+    rows_failed: list[str] = Field(
+        ...,
+        description='List of failures, e.g. ["signal1:no_model", "signal2:timeout"]',
+    )
+    completed_at: str = Field(
+        ..., description="ISO 8601 timestamp of completion"
+    )
+
+
 @router.post("/batch-predict")
 async def batch_predict(
     body: BatchPredictBody,
     request: Request,
     conn: asyncpg.Connection = Depends(get_db_conn),
     agent: str = Depends(get_agent_name),
-) -> dict[str, Any]:
+) -> BatchPredictResponse:
     """Trigger atomic batch inference on all active signals at latest ts.
 
     Called by feature compute webhook after persist succeeds. Fetches
@@ -58,11 +83,11 @@ async def batch_predict(
 
     Returns:
         {
-            "queued": <int>,           # Total signals processed
-            "written": <int>,          # Signals with predictions written
-            "skipped": <int>,          # Signals skipped (no features)
-            "latest_ts": <ISO string>, # Timestamp of inference
-            "compute_run_id": <str>,   # Audit trail
+            "status": "ok" | "partial" | "error",
+            "signals_processed": <int>,     # Total signals attempted
+            "rows_written": <int>,          # Signals with predictions written
+            "rows_failed": [<str>, ...],    # e.g. ["signal1:no_model", "signal2:timeout"]
+            "completed_at": <ISO string>,   # Timestamp of inference
         }
     """
     # Step 1: Get latest timestamp from feature_values
@@ -78,38 +103,39 @@ async def batch_predict(
     # Step 2: Fetch all active/shadow signals
     signals = await signals_repo.fetch_active_signals(conn)
     if not signals:
-        return {
-            "queued": 0,
-            "written": 0,
-            "skipped": 0,
-            "latest_ts": latest_ts.isoformat(),
-            "compute_run_id": body.compute_run_id,
-        }
+        return BatchPredictResponse(
+            status="ok",
+            signals_processed=0,
+            rows_written=0,
+            rows_failed=[],
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     # Step 3–5: For each signal, resolve model → load artifact → predict → write
     artifact_dir = request.app.state.settings.artifact_dir
     to_write: list[tuple[UUID, str, datetime, float, dict[str, Any]]] = []
-    skipped_count = 0
+    rows_failed: list[str] = []
 
     for signal in signals:
         signal_id: UUID = signal["signal_id"]
+        signal_name = signal.get("name", str(signal_id))
         try:
             # Resolve model
             model = await models_repo.fetch_model_registry_row(
                 conn, signal["model_id"]
             )
             if model is None or model["status"] in ("retired", "rejected_by_operator"):
-                skipped_count += 1
+                rows_failed.append(f"{signal_name}:no_model")
                 continue
             if not model.get("artifact_sha256"):
-                skipped_count += 1
+                rows_failed.append(f"{signal_name}:no_artifact")
                 continue
 
             # Load artifact
             try:
                 payload = read_artifact(model["artifact_sha256"], artifact_dir)
             except (FileNotFoundError, ValueError):
-                skipped_count += 1
+                rows_failed.append(f"{signal_name}:artifact_load_failed")
                 continue
 
             # Get feature versions
@@ -117,7 +143,7 @@ async def batch_predict(
             versions = await features_repo.fetch_feature_versions(conn, feature_names)
             missing_versions = [n for n in feature_names if n not in versions]
             if missing_versions:
-                skipped_count += 1
+                rows_failed.append(f"{signal_name}:missing_features")
                 continue
 
             # For each symbol + interval combo in the model
@@ -125,7 +151,7 @@ async def batch_predict(
             interval = model.get("serving_interval") or model.get("interval", "")
 
             if not symbol or not interval:
-                skipped_count += 1
+                rows_failed.append(f"{signal_name}:no_symbol_or_interval")
                 continue
 
             # Fetch feature vector at latest_ts
@@ -142,10 +168,10 @@ async def batch_predict(
             try:
                 value, confidence = predict_single(payload, feature_vector)
             except MissingFeatureError:
-                skipped_count += 1
+                rows_failed.append(f"{signal_name}:missing_feature_vector")
                 continue
             except EmptyModelError:
-                skipped_count += 1
+                rows_failed.append(f"{signal_name}:empty_model")
                 continue
 
             # Queue for write
@@ -159,10 +185,15 @@ async def batch_predict(
             }
             to_write.append((signal_id, symbol, latest_ts, value, meta))
 
-        except Exception:
+        except Exception as e:
             # If any single signal fails, don't crash the whole batch.
             # Just skip it and continue.
-            skipped_count += 1
+            logger.exception(
+                "unexpected error processing signal",
+                signal=signal_name,
+                error=repr(e),
+            )
+            rows_failed.append(f"{signal_name}:unexpected_error")
             continue
 
     # Step 6: Write all predictions atomically
@@ -177,17 +208,28 @@ async def batch_predict(
                     symbol=symbol,
                     ts=ts,
                     value=value,
-                    confidence=None,
+                    confidence=None,  # Model confidence unused for now; could add model uncertainty in future
                     source="stream",
                     meta=meta,
                     created_by=agent,
                 )
                 rows_written += 1
 
-    return {
-        "queued": len(signals),
-        "written": rows_written,
-        "skipped": skipped_count,
-        "latest_ts": latest_ts.isoformat(),
-        "compute_run_id": body.compute_run_id,
-    }
+    # Determine status based on results
+    signals_processed = len(signals)
+    if signals_processed == 0:
+        status = "ok"
+    elif rows_failed and rows_written == 0:
+        status = "error"
+    elif rows_failed:
+        status = "partial"
+    else:
+        status = "ok"
+
+    return BatchPredictResponse(
+        status=status,
+        signals_processed=signals_processed,
+        rows_written=rows_written,
+        rows_failed=rows_failed,
+        completed_at=datetime.now(timezone.utc).isoformat(),
+    )
